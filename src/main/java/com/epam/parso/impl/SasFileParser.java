@@ -1,50 +1,60 @@
 /**
  * *************************************************************************
  * Copyright (C) 2015 EPAM
-
+ * <p>
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- *
+ * <p>
  * http://www.apache.org/licenses/LICENSE-2.0
- *
+ * <p>
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
+ * <p>
  * *************************************************************************
  */
 
 package com.epam.parso.impl;
 
-import com.epam.parso.*;
+import com.epam.parso.Column;
+import com.epam.parso.ColumnFormat;
+import com.epam.parso.ColumnMissingInfo;
+import com.epam.parso.SasFileProperties;
+import com.epam.parso.date.OutputDateType;
+import com.epam.parso.date.SasTemporalFormatter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-
 import java.io.DataInputStream;
-import java.io.InputStream;
-import java.io.IOException;
 import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.UnsupportedEncodingException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Map;
-import java.util.Date;
+import java.util.*;
 
-import static com.epam.parso.impl.ParserMessageConstants.*;
+import static com.epam.parso.impl.ParserMessageConstants.BLOCK_COUNT;
+import static com.epam.parso.impl.ParserMessageConstants.COLUMN_FORMAT;
+import static com.epam.parso.impl.ParserMessageConstants.EMPTY_INPUT_STREAM;
+import static com.epam.parso.impl.ParserMessageConstants.FILE_NOT_VALID;
+import static com.epam.parso.impl.ParserMessageConstants.NO_SUPPORTED_COMPRESSION_LITERAL;
+import static com.epam.parso.impl.ParserMessageConstants.NULL_COMPRESSION_LITERAL;
+import static com.epam.parso.impl.ParserMessageConstants.PAGE_TYPE;
+import static com.epam.parso.impl.ParserMessageConstants.SUBHEADER_COUNT;
+import static com.epam.parso.impl.ParserMessageConstants.SUBHEADER_PROCESS_FUNCTION_NAME;
+import static com.epam.parso.impl.ParserMessageConstants.UNKNOWN_SUBHEADER_SIGNATURE;
 import static com.epam.parso.impl.SasFileConstants.*;
 
 /**
- * This is a class that parses sas7bdat files. When parsing a sas7bdat file, to interact with the library,
- * do not use this class but use {@link SasFileReaderImpl} instead.
+ * This is a class that parses sas7bdat files. When parsing a sas7bdat file, to interact with the library
+ * use {@link SasFileReaderImpl} which is a wrapper for SasFileParser. Despite this, SasFileParser
+ * is publicly available, it can be instanced via {@link SasFileParser.Builder} and used directly.
+ * Public access to the SasFileParser class was added in scope of this issue:
+ * @see <a href="https://github.com/epam/parso/issues/51"></a>.
  */
 public final class SasFileParser {
     /**
@@ -60,10 +70,22 @@ public final class SasFileParser {
     /**
      * The mapping of the supported string literals to the compression method they mean.
      */
-    private static final Map<String, Decompressor> LITERALS_TO_DECOMPRESSOR = new HashMap<String, Decompressor>();
+    private static final Map<String, Decompressor> LITERALS_TO_DECOMPRESSOR = new HashMap<>();
+
+    /**
+     * Sanity check on maximum page length.
+     */
+    private static final int MAX_PAGE_LENGTH = 10000000;
+
+    /**
+     * Byte buffer used for skip operations.
+     * Actually the data containing in this buffer is ignored,
+     * because it only used for dummy reads.
+     */
+    private static final byte[] SKIP_BYTE_BUFFER = new byte[4096];
 
     static {
-        Map<Long, SubheaderIndexes> tmpMap = new HashMap<Long, SubheaderIndexes>();
+        Map<Long, SubheaderIndexes> tmpMap = new HashMap<>();
         tmpMap.put((long) 0xF7F7F7F7, SubheaderIndexes.ROW_SIZE_SUBHEADER_INDEX);
         tmpMap.put((long) 0xF6F6F6F6, SubheaderIndexes.COLUMN_SIZE_SUBHEADER_INDEX);
         tmpMap.put((long) 0xFFFFFC00, SubheaderIndexes.SUBHEADER_COUNTS_SUBHEADER_INDEX);
@@ -100,10 +122,16 @@ public final class SasFileParser {
      * The flag of data output in binary or string format.
      */
     private final Boolean byteOutput;
+
+    /**
+     * Output date type.
+     */
+    private final OutputDateType outputDateType;
+
     /**
      * The list of current page data subheaders.
      */
-    private final List<SubheaderPointer> currentPageDataSubheaderPointers = new ArrayList<SubheaderPointer>();
+    private final List<SubheaderPointer> currentPageDataSubheaderPointers = new ArrayList<>();
     /**
      * The variable to store all the properties from the sas7bdat file.
      */
@@ -113,27 +141,27 @@ public final class SasFileParser {
      * Every element corresponds to a {@link SasFileParser.ColumnTextSubheader}. The first text block includes
      * the information about compression.
      */
-    private final List<byte[]> columnsNamesBytes = new ArrayList<byte[]>();
+    private final List<byte[]> columnsNamesBytes = new ArrayList<>();
     /**
      * The list of column names.
      */
-    private final List<String> columnsNamesList = new ArrayList<String>();
+    private final List<String> columnsNamesList = new ArrayList<>();
     /**
      * The list of column types. There can be {@link Number} and {@link String} types.
      */
-    private final List<Class<?>> columnsTypesList = new ArrayList<Class<?>>();
+    private final List<Class<?>> columnsTypesList = new ArrayList<>();
     /**
      * The list of offsets of data in every column inside a row. Used to locate the left border of a cell.
      */
-    private final List<Long> columnsDataOffset = new ArrayList<Long>();
+    private final List<Long> columnsDataOffset = new ArrayList<>();
     /**
      * The list of data lengths of every column inside a row. Used to locate the right border of a cell.
      */
-    private final List<Integer> columnsDataLength = new ArrayList<Integer>();
+    private final List<Integer> columnsDataLength = new ArrayList<>();
     /**
      * The list of table columns to store their name, label, and format.
      */
-    private final List<Column> columns = new ArrayList<Column>();
+    private final List<Column> columns = new ArrayList<>();
     /**
      * The mapping between elements from {@link SubheaderIndexes} and classes corresponding
      * to each subheader. This is necessary because defining the subheader type being processed is dynamic.
@@ -151,8 +179,8 @@ public final class SasFileParser {
     private byte[] cachedPage;
     /**
      * The type of the current page when reading the file. If it is other than
-     * {@link SasFileConstants#PAGE_META_TYPE_1}, {@link SasFileConstants#PAGE_META_TYPE_1},
-     * {@link SasFileConstants#PAGE_MIX_TYPE} and {@link SasFileConstants#PAGE_DATA_TYPE} page is skipped.
+     * {@link PageType#PAGE_TYPE_META}, {@link PageType#PAGE_TYPE_MIX}, {@link PageType#PAGE_TYPE_DATA}
+     * and {@link PageType#PAGE_TYPE_AMD} page is skipped.
      */
     private int currentPageType;
     /**
@@ -189,9 +217,43 @@ public final class SasFileParser {
     private boolean eof;
 
     /**
+     * The offset of the file label from the beginning of the {@link SasFileParser.ColumnTextSubheader} subheader.
+     */
+    private int fileLabelOffset;
+
+    /**
+     * The offset of the compression method from the beginning of the
+     * {@link SasFileParser.ColumnTextSubheader} subheader.
+     */
+    private int compressionMethodOffset;
+
+    /**
+     * The length of the compression method which is stored in the
+     * {@link SasFileParser.ColumnTextSubheader} subheader
+     * with {@link SasFileParser#compressionMethodOffset} offset.
+     */
+    private int compressionMethodLength;
+
+    /**
+     * The length of file label which is stored in the {@link SasFileParser.ColumnTextSubheader} subheader
+     * with {@link SasFileParser#fileLabelOffset} offset.
+     */
+    private int fileLabelLength;
+
+    /**
      * The list of missing column information.
      */
-    private List<ColumnMissingInfo> columnMissingInfoList = new ArrayList<ColumnMissingInfo>();
+    private final List<ColumnMissingInfo> columnMissingInfoList = new ArrayList<>();
+
+    /**
+     * An bit representation in String marking deleted records.
+     */
+    private String deletedMarkers = "";
+
+    /**
+     * Instance of SasDateFormatter.
+     */
+    private final SasTemporalFormatter sasTemporalFormatter = new SasTemporalFormatter();
 
     /**
      * The constructor that reads metadata from the sas7bdat, parses it and puts the results in
@@ -201,10 +263,10 @@ public final class SasFileParser {
      */
     private SasFileParser(Builder builder) {
         sasFileStream = new DataInputStream(builder.sasFileStream);
-        encoding = builder.encoding;
         byteOutput = builder.byteOutput;
+        outputDateType = builder.outputDateType;
 
-        Map<SubheaderIndexes, ProcessingSubheader> tmpMap = new HashMap<SubheaderIndexes, ProcessingSubheader>();
+        Map<SubheaderIndexes, ProcessingSubheader> tmpMap = new HashMap<>();
         tmpMap.put(SubheaderIndexes.ROW_SIZE_SUBHEADER_INDEX, new RowSizeSubheader());
         tmpMap.put(SubheaderIndexes.COLUMN_SIZE_SUBHEADER_INDEX, new ColumnSizeSubheader());
         tmpMap.put(SubheaderIndexes.SUBHEADER_COUNTS_SUBHEADER_INDEX, new SubheaderCountsSubheader());
@@ -217,7 +279,7 @@ public final class SasFileParser {
         subheaderIndexToClass = Collections.unmodifiableMap(tmpMap);
 
         try {
-            getMetadataFromSasFile();
+            getMetadataFromSasFile(builder.encoding);
         } catch (IOException e) {
             LOGGER.error(e.getMessage(), e);
         }
@@ -227,11 +289,12 @@ public final class SasFileParser {
      * The method that reads and parses metadata from the sas7bdat and puts the results in
      * {@link SasFileParser#sasFileProperties}.
      *
+     * @param encoding - builder variable for {@link SasFileParser#encoding} variable.
      * @throws IOException - appears if reading from the {@link SasFileParser#sasFileStream} stream is impossible.
      */
-    private void getMetadataFromSasFile() throws IOException {
+    private void getMetadataFromSasFile(String encoding) throws IOException {
         boolean endOfMetadata = false;
-        processSasFileHeader();
+        processSasFileHeader(encoding);
         cachedPage = new byte[sasFileProperties.getPageLength()];
         while (!endOfMetadata) {
             try {
@@ -249,9 +312,10 @@ public final class SasFileParser {
      * After reading is complete, {@link SasFileParser#currentFilePosition} is set to the end of the header whose length
      * is stored at the {@link SasFileConstants#HEADER_SIZE_OFFSET} offset.
      *
+     * @param builderEncoding - builder variable for {@link SasFileParser#encoding} variable.
      * @throws IOException if reading from the {@link SasFileParser#sasFileStream} stream is impossible.
      */
-    private void processSasFileHeader() throws IOException {
+    private void processSasFileHeader(String builderEncoding) throws IOException {
         int align1 = 0;
         int align2 = 0;
 
@@ -284,17 +348,25 @@ public final class SasFileParser {
         if (!isSasFileValid()) {
             throw new IOException(FILE_NOT_VALID);
         }
-        String encoding = SAS_CHARACTER_ENCODINGS.get(vars.get(1)[0]);
-        if (encoding != null) {
-            this.encoding = encoding;
+
+        String fileEncoding = SAS_CHARACTER_ENCODINGS.get(vars.get(1)[0]);
+        if (builderEncoding != null) {
+            this.encoding = builderEncoding;
+        } else {
+            this.encoding = fileEncoding != null ? fileEncoding : this.encoding;
         }
-        sasFileProperties.setEncoding(this.encoding);
+        sasFileProperties.setEncoding(fileEncoding);
         sasFileProperties.setName(bytesToString(vars.get(2)).trim());
         sasFileProperties.setFileType(bytesToString(vars.get(3)).trim());
         sasFileProperties.setDateCreated(bytesToDateTime(vars.get(4)));
         sasFileProperties.setDateModified(bytesToDateTime(vars.get(5)));
         sasFileProperties.setHeaderLength(bytesToInt(vars.get(6)));
-        sasFileProperties.setPageLength(bytesToInt(vars.get(7)));
+        int pageLength = bytesToInt(vars.get(7));
+        if (pageLength > MAX_PAGE_LENGTH) {
+            throw new IOException("Page limit ("
+                    + pageLength + ") exceeds maximum: " + MAX_PAGE_LENGTH);
+        }
+        sasFileProperties.setPageLength(pageLength);
         sasFileProperties.setPageCount(bytesToLong(vars.get(8)));
         sasFileProperties.setSasRelease(bytesToString(vars.get(9)).trim());
         sasFileProperties.setServerType(bytesToString(vars.get(10)).trim());
@@ -306,16 +378,40 @@ public final class SasFileParser {
         }
 
         if (sasFileStream != null) {
+            skipBytes(sasFileProperties.getHeaderLength() - currentFilePosition);
+            currentFilePosition = 0;
+        }
+    }
+
+    /**
+     * Skip specified number of bytes of data from the input stream,
+     * or fail if there are not enough left.
+     *
+     * @param numberOfBytesToSkip the number of bytes to skip
+     * @throws IOException if the number of bytes skipped was incorrect
+     */
+    private void skipBytes(long numberOfBytesToSkip) throws IOException {
+
+        long remainBytes = numberOfBytesToSkip;
+        long readBytes;
+        while (remainBytes > 0) {
             try {
-                int bytesLeft = sasFileProperties.getHeaderLength() - currentFilePosition;
-                long actuallySkipped = 0;
-                while (actuallySkipped < bytesLeft) {
-                    actuallySkipped += sasFileStream.skip(bytesLeft - actuallySkipped);
+                readBytes = sasFileStream.read(SKIP_BYTE_BUFFER, 0,
+                        (int) Math.min(remainBytes, SKIP_BYTE_BUFFER.length));
+                if (readBytes < 0) { // EOF
+                    break;
                 }
-                currentFilePosition = 0;
             } catch (IOException e) {
                 throw new IOException(EMPTY_INPUT_STREAM);
             }
+            remainBytes -= readBytes;
+        }
+
+        long actuallySkipped = numberOfBytesToSkip - remainBytes;
+
+        if (actuallySkipped != numberOfBytesToSkip) {
+            throw new IOException("Expected to skip " + numberOfBytesToSkip
+                    + " to the end of the header, but skipped " + actuallySkipped + " instead.");
         }
     }
 
@@ -323,6 +419,7 @@ public final class SasFileParser {
      * The method to validate sas7bdat file. If sasFileProperties contains an encoding value other than
      * {@link SasFileConstants#LITTLE_ENDIAN_CHECKER} or {@link SasFileConstants#BIG_ENDIAN_CHECKER}
      * the file is considered invalid.
+     *
      * @return true if the value of encoding equals to {@link SasFileConstants#LITTLE_ENDIAN_CHECKER}
      * or {@link SasFileConstants#BIG_ENDIAN_CHECKER}
      */
@@ -344,19 +441,18 @@ public final class SasFileParser {
     private boolean processSasFilePageMeta() throws IOException {
         int bitOffset = sasFileProperties.isU64() ? PAGE_BIT_OFFSET_X64 : PAGE_BIT_OFFSET_X86;
         readPageHeader();
-        List<SubheaderPointer> subheaderPointers = new ArrayList<SubheaderPointer>();
-        if (currentPageType == PAGE_META_TYPE_1 || currentPageType == PAGE_META_TYPE_2
-                || currentPageType == PAGE_MIX_TYPE) {
+        List<SubheaderPointer> subheaderPointers = new ArrayList<>();
+        if (PageType.PAGE_TYPE_META.contains(currentPageType) || PageType.PAGE_TYPE_MIX.contains(currentPageType)) {
             processPageMetadata(bitOffset, subheaderPointers);
         }
-        return currentPageType == PAGE_DATA_TYPE || currentPageType == PAGE_MIX_TYPE
+        return PageType.PAGE_TYPE_DATA.contains(currentPageType) || PageType.PAGE_TYPE_MIX.contains(currentPageType)
                 || currentPageDataSubheaderPointers.size() != 0;
     }
 
     /**
-     * The method to parse and read metadata of a page, used for pages of the {@link SasFileConstants#PAGE_META_TYPE_1}
-     * {@link SasFileConstants#PAGE_META_TYPE_1}, and {@link SasFileConstants#PAGE_MIX_TYPE} types. The method goes
-     * through subheaders, one by one, and calls the processing functions depending on their signatures.
+     * The method to parse and read metadata of a page, used for pages of the {@link PageType#PAGE_TYPE_META}
+     * and {@link PageType#PAGE_TYPE_MIX} types. The method goes through subheaders, one by one, and calls
+     * the processing functions depending on their signatures.
      *
      * @param bitOffset         the offset from the beginning of the page at which the page stores its metadata.
      * @param subheaderPointers the number of subheaders on the page.
@@ -367,25 +463,29 @@ public final class SasFileParser {
         subheaderPointers.clear();
         for (int subheaderPointerIndex = 0; subheaderPointerIndex < currentPageSubheadersCount;
              subheaderPointerIndex++) {
-            SubheaderPointer currentSubheaderPointer = processSubheaderPointers((long) bitOffset
-                    + SUBHEADER_POINTERS_OFFSET, subheaderPointerIndex);
-            subheaderPointers.add(currentSubheaderPointer);
-            if (currentSubheaderPointer.compression != TRUNCATED_SUBHEADER_ID) {
-                long subheaderSignature = readSubheaderSignature(currentSubheaderPointer.offset);
-                SubheaderIndexes subheaderIndex = chooseSubheaderClass(subheaderSignature,
-                        currentSubheaderPointer.compression, currentSubheaderPointer.type);
-                if (subheaderIndex != null) {
-                    if (subheaderIndex != SubheaderIndexes.DATA_SUBHEADER_INDEX) {
-                        LOGGER.debug(SUBHEADER_PROCESS_FUNCTION_NAME, subheaderIndex);
-                        subheaderIndexToClass.get(subheaderIndex).processSubheader(
-                                subheaderPointers.get(subheaderPointerIndex).offset,
-                                subheaderPointers.get(subheaderPointerIndex).length);
+            try {
+                SubheaderPointer currentSubheaderPointer = processSubheaderPointers((long) bitOffset
+                        + SUBHEADER_POINTERS_OFFSET, subheaderPointerIndex);
+                subheaderPointers.add(currentSubheaderPointer);
+                if (currentSubheaderPointer.compression != TRUNCATED_SUBHEADER_ID) {
+                    long subheaderSignature = readSubheaderSignature(currentSubheaderPointer.offset);
+                    SubheaderIndexes subheaderIndex = chooseSubheaderClass(subheaderSignature,
+                            currentSubheaderPointer.compression, currentSubheaderPointer.type);
+                    if (subheaderIndex != null) {
+                        if (subheaderIndex != SubheaderIndexes.DATA_SUBHEADER_INDEX) {
+                            LOGGER.debug(SUBHEADER_PROCESS_FUNCTION_NAME, subheaderIndex);
+                            subheaderIndexToClass.get(subheaderIndex).processSubheader(
+                                    subheaderPointers.get(subheaderPointerIndex).offset,
+                                    subheaderPointers.get(subheaderPointerIndex).length);
+                        } else {
+                            currentPageDataSubheaderPointers.add(subheaderPointers.get(subheaderPointerIndex));
+                        }
                     } else {
-                        currentPageDataSubheaderPointers.add(subheaderPointers.get(subheaderPointerIndex));
+                        LOGGER.debug(UNKNOWN_SUBHEADER_SIGNATURE);
                     }
-                } else {
-                    LOGGER.debug(UNKNOWN_SUBHEADER_SIGNATURE);
                 }
+            } catch (Exception e) {
+                LOGGER.warn("Encountered broken page metadata. Skipping subheader.");
             }
         }
     }
@@ -456,43 +556,63 @@ public final class SasFileParser {
     }
 
     /**
-     * Return the compression literal if it is contained in the input string.
-     * If the are many the first match is return.
-     * If there are no matches, <code>null</code> is returned
+     * Match the input string against the known compression methods.
      *
-     * @param src input string to look for matches
-     * @return First match of a supported compression literal or null if no literal matches the input string.
+     * @param compressionMethod the name of the compression method, like "SASYZCRL"
+     * @return true if the method is matched or false otherwise.
      */
-    private String findCompressionLiteral(String src) {
-        if (src == null) {
+    private boolean matchCompressionMethod(String compressionMethod) {
+        if (compressionMethod == null) {
             LOGGER.warn(NULL_COMPRESSION_LITERAL);
-            return null;
+            return false;
         }
-
-        for (String supported : LITERALS_TO_DECOMPRESSOR.keySet()) {
-            if (src.contains(supported)) {
-                return supported;
-            }
+        if (LITERALS_TO_DECOMPRESSOR.containsKey(compressionMethod)) {
+            return true;
         }
         LOGGER.debug(NO_SUPPORTED_COMPRESSION_LITERAL);
-        return null;
+        return false;
     }
 
     /**
-     * The function to read next row from current sas7bdat file.
+     * The function to return the index of the current row when reading the file sas7bdat file.
      *
-     * @param columnNames list of column names which should be processed.
+     * @return current row index
+     */
+    Integer getOffset() {
+      return currentRowInFileIndex;
+    }
+
+    /**
+     * The function to read and process all columns of next row from current sas7bdat file.
+     *
      * @return the object array containing elements of current row.
      * @throws IOException if reading from the {@link SasFileParser#sasFileStream} stream is impossible.
      */
-    Object[] readNext(List<String> columnNames) throws IOException {
+    public Object[] readNext() throws IOException {
+        return readNext(null);
+    }
+
+    /**
+     * The function to read and process specified columns of next row from current sas7bdat file.
+     *
+     * @param columnNames list of column names which should be processed, if null then all columns are processed.
+     * @return the object array containing elements of current row.
+     * @throws IOException if reading from the {@link SasFileParser#sasFileStream} stream is impossible.
+     */
+    public Object[] readNext(List<String> columnNames) throws IOException {
         if (currentRowInFileIndex++ >= sasFileProperties.getRowCount() || eof) {
             return null;
         }
         int bitOffset = sasFileProperties.isU64() ? PAGE_BIT_OFFSET_X64 : PAGE_BIT_OFFSET_X86;
+        currentRow = null;
         switch (currentPageType) {
             case PAGE_META_TYPE_1:
             case PAGE_META_TYPE_2:
+            case PAGE_CMETA_TYPE:
+                if (currentPageDataSubheaderPointers.size() == 0 && currentPageType == PAGE_CMETA_TYPE) {
+                    readNextPage();
+                    currentRowOnPageIndex = 0;
+                }
                 SubheaderPointer currentSubheaderPointer =
                         currentPageDataSubheaderPointers.get(currentRowOnPageIndex++);
                 ((ProcessingDataSubheader) subheaderIndexToClass.get(SubheaderIndexes.DATA_SUBHEADER_INDEX))
@@ -502,14 +622,41 @@ public final class SasFileParser {
                     currentRowOnPageIndex = 0;
                 }
                 break;
-            case PAGE_MIX_TYPE:
+            case PAGE_MIX_TYPE_1:
+                // Mix pages that contain all valid records
                 int subheaderPointerLength = sasFileProperties.isU64() ? SUBHEADER_POINTER_LENGTH_X64
                         : SUBHEADER_POINTER_LENGTH_X86;
                 int alignCorrection = (bitOffset + SUBHEADER_POINTERS_OFFSET + currentPageSubheadersCount
                         * subheaderPointerLength) % BITS_IN_BYTE;
+
                 currentRow = processByteArrayWithData(bitOffset + SUBHEADER_POINTERS_OFFSET + alignCorrection
                         + currentPageSubheadersCount * subheaderPointerLength + currentRowOnPageIndex++
                         * sasFileProperties.getRowLength(), sasFileProperties.getRowLength(), columnNames);
+
+                if (currentRowOnPageIndex == Math.min(sasFileProperties.getRowCount(),
+                        sasFileProperties.getMixPageRowCount())) {
+                    readNextPage();
+                    currentRowOnPageIndex = 0;
+                }
+                break;
+            case PAGE_MIX_TYPE_2:
+                // Mix pages that contain valid and deleted records
+                if (Objects.equals(deletedMarkers, "")) {
+                    readDeletedInfo();
+                    LOGGER.info(deletedMarkers);
+                }
+                subheaderPointerLength = sasFileProperties.isU64() ? SUBHEADER_POINTER_LENGTH_X64
+                        : SUBHEADER_POINTER_LENGTH_X86;
+                alignCorrection = (bitOffset + SUBHEADER_POINTERS_OFFSET + currentPageSubheadersCount
+                        * subheaderPointerLength) % BITS_IN_BYTE;
+
+                if (deletedMarkers.charAt(currentRowOnPageIndex) == '0') {
+                    currentRow = processByteArrayWithData(bitOffset + SUBHEADER_POINTERS_OFFSET + alignCorrection
+                            + currentPageSubheadersCount * subheaderPointerLength + currentRowOnPageIndex++
+                            * sasFileProperties.getRowLength(), sasFileProperties.getRowLength(), columnNames);
+                } else {
+                    currentRowOnPageIndex++;
+                }
                 if (currentRowOnPageIndex == Math.min(sasFileProperties.getRowCount(),
                         sasFileProperties.getMixPageRowCount())) {
                     readNextPage();
@@ -517,8 +664,29 @@ public final class SasFileParser {
                 }
                 break;
             case PAGE_DATA_TYPE:
+                // Data pages that contain all valid records
                 currentRow = processByteArrayWithData(bitOffset + SUBHEADER_POINTERS_OFFSET + currentRowOnPageIndex++
                         * sasFileProperties.getRowLength(), sasFileProperties.getRowLength(), columnNames);
+                if (currentRowOnPageIndex == currentPageBlockCount) {
+                    readNextPage();
+                    currentRowOnPageIndex = 0;
+                }
+                break;
+            case PAGE_DATA_TYPE_2:
+                // Data pages that contain valid and deleted records
+                if (Objects.equals(deletedMarkers, "")) {
+                    readDeletedInfo();
+                    LOGGER.info(deletedMarkers);
+                    LOGGER.info(Integer.toString(deletedMarkers.length()));
+                    LOGGER.info(Integer.toString(currentPageBlockCount));
+                }
+                if (deletedMarkers.charAt(currentRowOnPageIndex) == '0') {
+                    currentRow = processByteArrayWithData(bitOffset + SUBHEADER_POINTERS_OFFSET
+                            + currentRowOnPageIndex++
+                            * sasFileProperties.getRowLength(), sasFileProperties.getRowLength(), columnNames);
+                } else {
+                    currentRowOnPageIndex++;
+                }
                 if (currentRowOnPageIndex == currentPageBlockCount) {
                     readNextPage();
                     currentRowOnPageIndex = 0;
@@ -527,22 +695,25 @@ public final class SasFileParser {
             default:
                 break;
         }
+        if (currentRow == null) {
+            return null;
+        }
         return Arrays.copyOf(currentRow, currentRow.length);
     }
 
     /**
      * The method to read next page from sas7bdat file and put it into {@link SasFileParser#cachedPage}. If this page
-     * has {@link SasFileConstants#PAGE_META_TYPE_1} or {@link SasFileConstants#PAGE_META_TYPE_2} type method process
-     * it's subheaders. Method skips page with type other than {@link SasFileConstants#PAGE_META_TYPE_1},
-     * {@link SasFileConstants#PAGE_META_TYPE_2}, {@link SasFileConstants#PAGE_MIX_TYPE} or
-     * {@link SasFileConstants#PAGE_DATA_TYPE} and reads next.
+     * has {@link PageType#PAGE_TYPE_META} type method process it's subheaders. Method skips page with type other
+     * than {@link PageType#PAGE_TYPE_META}, {@link PageType#PAGE_TYPE_MIX} or {@link PageType#PAGE_TYPE_DATA}
+     * and reads next.
      *
      * @throws IOException if reading from the {@link SasFileParser#sasFileStream} stream is impossible.
      */
     private void readNextPage() throws IOException {
+        deletedMarkers = "";
         processNextPage();
-        while (currentPageType != PAGE_META_TYPE_1 && currentPageType != PAGE_META_TYPE_2
-                && currentPageType != PAGE_MIX_TYPE && currentPageType != PAGE_DATA_TYPE) {
+        while (!PageType.PAGE_TYPE_META.contains(currentPageType) && !PageType.PAGE_TYPE_MIX.contains(currentPageType)
+                && !PageType.PAGE_TYPE_DATA.contains(currentPageType)) {
             if (eof) {
                 return;
             }
@@ -552,6 +723,7 @@ public final class SasFileParser {
 
     /**
      * Put next page to cache and read it's header.
+     *
      * @throws IOException if reading from the {@link SasFileParser#sasFileStream} string is impossible.
      */
     private void processNextPage() throws IOException {
@@ -566,11 +738,12 @@ public final class SasFileParser {
         }
 
         readPageHeader();
-        if (currentPageType == PAGE_META_TYPE_1 || currentPageType == PAGE_META_TYPE_2
-                || currentPageType == PAGE_AMD_TYPE) {
-            List<SubheaderPointer> subheaderPointers = new ArrayList<SubheaderPointer>();
+        if (PageType.PAGE_TYPE_META.contains(currentPageType) || PageType.PAGE_TYPE_AMD.contains(currentPageType)
+                || PageType.PAGE_TYPE_MIX.contains(currentPageType)) {
+            List<SubheaderPointer> subheaderPointers = new ArrayList<>();
             processPageMetadata(bitOffset, subheaderPointers);
-            if (currentPageType == PAGE_AMD_TYPE) {
+            readDeletedInfo();
+            if (PageType.PAGE_TYPE_AMD.contains(currentPageType)) {
                 processMissingColumnInfo();
             }
         }
@@ -578,6 +751,7 @@ public final class SasFileParser {
 
     /**
      * The function to process missing column information.
+     *
      * @throws UnsupportedEncodingException when unknown encoding.
      */
     private void processMissingColumnInfo() throws UnsupportedEncodingException {
@@ -623,11 +797,47 @@ public final class SasFileParser {
     }
 
     /**
+     * The function to get the deleted record pointers.
+     *
+     * @throws IOException if reading pointers is impossible.
+     */
+    private void readDeletedInfo() throws IOException {
+        long deletedPointerOffset;
+        int subheaderPointerLength;
+        int bitOffset;
+        if (sasFileProperties.isU64()) {
+            deletedPointerOffset = PAGE_DELETED_POINTER_OFFSET_X64;
+            subheaderPointerLength = SUBHEADER_POINTER_LENGTH_X64;
+            bitOffset = PAGE_BIT_OFFSET_X64 + 8;
+        } else {
+            deletedPointerOffset = PAGE_DELETED_POINTER_OFFSET_X86;
+            subheaderPointerLength = SUBHEADER_POINTER_LENGTH_X86;
+            bitOffset = PAGE_BIT_OFFSET_X86 + 8;
+        }
+        int alignCorrection = (bitOffset + SUBHEADER_POINTERS_OFFSET + currentPageSubheadersCount
+                * subheaderPointerLength) % BITS_IN_BYTE;
+        List<byte[]> vars = getBytesFromFile(new Long[] {deletedPointerOffset},
+                new Integer[] {PAGE_DELETED_POINTER_LENGTH});
+
+        long currentPageDeletedPointer = bytesToInt(vars.get(0));
+        long deletedMapOffset = bitOffset + currentPageDeletedPointer + alignCorrection
+                + (currentPageSubheadersCount * subheaderPointerLength)
+                + ((currentPageBlockCount - currentPageSubheadersCount) * sasFileProperties.getRowLength());
+        List<byte[]> bytes = getBytesFromFile(new Long[] {deletedMapOffset},
+            new Integer[] {(int) Math.ceil((currentPageBlockCount - currentPageSubheadersCount) / 8.0)});
+
+        byte[] x = bytes.get(0);
+        for (byte b : x) {
+            deletedMarkers += String.format("%8s", Integer.toString(b & 0xFF, 2)).replace(" ", "0");
+        }
+    }
+
+    /**
      * The function to convert the array of bytes that stores the data of a row into an array of objects.
      * Each object corresponds to a table cell.
      *
-     * @param rowOffset - the offset of the row in cachedPage.
-     * @param rowLength - the length of the row.
+     * @param rowOffset   - the offset of the row in cachedPage.
+     * @param rowLength   - the length of the row.
      * @param columnNames - list of column names which should be processed.
      * @return the array of objects storing the data of the row.
      */
@@ -668,8 +878,8 @@ public final class SasFileParser {
     /**
      * The function to process element of row.
      *
-     * @param source an array of bytes containing required data.
-     * @param offset the offset in source of required data.
+     * @param source             an array of bytes containing required data.
+     * @param offset             the offset in source of required data.
      * @param currentColumnIndex index of the current element.
      * @return object storing the data of the element.
      */
@@ -685,14 +895,16 @@ public final class SasFileParser {
                 if (columns.get(currentColumnIndex).getFormat().getName().isEmpty()) {
                     return convertByteArrayToNumber(temp);
                 } else {
-                    if (DATE_TIME_FORMAT_STRINGS.contains(columns.get(currentColumnIndex).getFormat().getName())) {
-                        return bytesToDateTime(temp);
+                    ColumnFormat columnFormat = columns.get(currentColumnIndex).getFormat();
+                    String sasDateFormat = columnFormat.getName();
+                    if (SasTemporalFormatter.isDateTimeFormat(sasDateFormat)) {
+                        return bytesToDateTime(temp, outputDateType, columnFormat);
+                    } else if (SasTemporalFormatter.isDateFormat(sasDateFormat)) {
+                        return bytesToDate(temp, outputDateType, columnFormat);
+                    } else if (SasTemporalFormatter.isTimeFormat(sasDateFormat)) {
+                        return bytesToTime(temp, outputDateType, columnFormat);
                     } else {
-                        if (DATE_FORMAT_STRINGS.contains(columns.get(currentColumnIndex).getFormat().getName())) {
-                            return bytesToDate(temp);
-                        } else {
-                            return convertByteArrayToNumber(temp);
-                        }
+                        return convertByteArrayToNumber(temp);
                     }
                 }
             }
@@ -722,18 +934,11 @@ public final class SasFileParser {
      * @throws IOException if reading from the {@link SasFileParser#sasFileStream} stream is impossible.
      */
     private List<byte[]> getBytesFromFile(Long[] offset, Integer[] length) throws IOException {
-        List<byte[]> vars = new ArrayList<byte[]>();
+        List<byte[]> vars = new ArrayList<>();
         if (cachedPage == null) {
             for (int i = 0; i < offset.length; i++) {
                 byte[] temp = new byte[length[i]];
-                long actuallySkipped = 0;
-                while (actuallySkipped < offset[i] - currentFilePosition) {
-                    try {
-                        actuallySkipped += sasFileStream.skip(offset[i] - currentFilePosition - actuallySkipped);
-                    } catch (IOException e) {
-                        throw new IOException(EMPTY_INPUT_STREAM);
-                    }
-                }
+                skipBytes(offset[i] - currentFilePosition);
                 try {
                     sasFileStream.readFully(temp, 0, length[i]);
                 } catch (EOFException e) {
@@ -856,11 +1061,11 @@ public final class SasFileParser {
     /**
      * The function to convert a sub-range of an array of bytes into a string.
      *
-     * @param bytes a string represented by an array of bytes.
+     * @param bytes  a string represented by an array of bytes.
      * @param offset the initial offset
-     * @param length  the length
+     * @param length the length
      * @return the conversion result string.
-     * @throws UnsupportedEncodingException when unknown encoding.
+     * @throws UnsupportedEncodingException    when unknown encoding.
      * @throws StringIndexOutOfBoundsException when invalid offset and/or length.
      */
     private String bytesToString(byte[] bytes, int offset, int length)
@@ -869,31 +1074,65 @@ public final class SasFileParser {
     }
 
     /**
-     * The function to convert an array of bytes that stores the number of seconds elapsed from 01/01/1960 into
-     * a variable of the {@link Date} type. The {@link SasFileConstants#DATE_TIME_FORMAT_STRINGS} variable stores
-     * the formats of the columns that store such data.
+     * The function to convert an array of bytes that stores the number of seconds
+     * elapsed from 01/01/1960 into a variable of the {@link Date} type.
      *
      * @param bytes an array of bytes that stores the type.
      * @return a variable of the {@link Date} type.
      */
     private Date bytesToDateTime(byte[] bytes) {
         double doubleSeconds = bytesToDouble(bytes);
-        return Double.isNaN(doubleSeconds) ? null : new Date((long) ((doubleSeconds - START_DATES_SECONDS_DIFFERENCE)
-                * MILLISECONDS_IN_SECONDS));
+        if (Double.isNaN(doubleSeconds)) {
+            return null;
+        } else {
+            return sasTemporalFormatter.formatSasSecondsAsJavaDate(doubleSeconds);
+        }
     }
 
     /**
-     * The function to convert an array of bytes that stores the number of days elapsed from 01/01/1960 into a variable
-     * of the {@link Date} type. {@link SasFileConstants#DATE_FORMAT_STRINGS} stores the formats of columns that contain
-     * such data.
+     * The function to convert an array of bytes that stores the number of seconds
+     * elapsed from 01/01/1960 into the date represented according to outputDateType.
      *
-     * @param bytes the array of bytes that stores the number of days from 01/01/1960.
-     * @return a variable of the {@link Date} type.
+     * @param bytes          an array of bytes that stores the type.
+     * @param outputDateType type of the date formatting
+     * @param columnFormat   SAS date format
+     * @return datetime representation
      */
-    private Date bytesToDate(byte[] bytes) {
+    private Object bytesToDateTime(byte[] bytes, OutputDateType outputDateType, ColumnFormat columnFormat) {
+        double doubleSeconds = bytesToDouble(bytes);
+        return sasTemporalFormatter.formatSasDateTime(doubleSeconds, outputDateType,
+                columnFormat.getName(), columnFormat.getWidth(), columnFormat.getPrecision());
+    }
+
+    /**
+     * The function to convert an array of bytes that stores the number of seconds
+     * since midnight into the date represented according to outputDateType.
+     *
+     * @param bytes          an array of bytes that stores the type.
+     * @param outputDateType type of the date formatting
+     * @param columnFormat   SAS date format
+     * @return time representation
+     */
+    private Object bytesToTime(byte[] bytes, OutputDateType outputDateType, ColumnFormat columnFormat) {
+        double doubleSeconds = bytesToDouble(bytes);
+        return sasTemporalFormatter.formatSasTime(doubleSeconds, outputDateType,
+                columnFormat.getName(), columnFormat.getWidth(), columnFormat.getPrecision());
+    }
+
+
+    /**
+     * The function to convert an array of bytes that stores the number of days
+     * elapsed from 01/01/1960  into the date represented according to outputDateType.
+     *
+     * @param bytes          the array of bytes that stores the number of days from 01/01/1960.
+     * @param outputDateType type of the date formatting
+     * @param columnFormat   SAS date format
+     * @return date representation
+     */
+    private Object bytesToDate(byte[] bytes, OutputDateType outputDateType, ColumnFormat columnFormat) {
         double doubleDays = bytesToDouble(bytes);
-        return Double.isNaN(doubleDays) ? null : new Date((long) ((doubleDays - START_DATES_DAYS_DIFFERENCE)
-                * SECONDS_IN_MINUTE * MINUTES_IN_HOUR * HOURS_IN_DAY * MILLISECONDS_IN_SECONDS));
+        return sasTemporalFormatter.formatSasDate(doubleDays, outputDateType,
+                columnFormat.getName(), columnFormat.getWidth(), columnFormat.getPrecision());
     }
 
     /**
@@ -946,6 +1185,7 @@ public final class SasFileParser {
 
     /**
      * Columns getter.
+     *
      * @return columns list.
      */
     List<Column> getColumns() {
@@ -957,7 +1197,7 @@ public final class SasFileParser {
      *
      * @return the object of the {@link SasFileProperties} class that stores file metadata.
      */
-    SasFileProperties getSasFileProperties() {
+    public SasFileProperties getSasFileProperties() {
         return sasFileProperties;
     }
 
@@ -1019,6 +1259,7 @@ public final class SasFileParser {
     private interface ProcessingSubheader {
         /**
          * Method which should be overwritten in implementing this interface classes.
+         *
          * @param subheaderOffset offset in bytes from the beginning of subheader.
          * @param subheaderLength length of subheader in bytes.
          * @throws IOException if reading from the {@link SasFileParser#sasFileStream} stream is impossible.
@@ -1032,9 +1273,10 @@ public final class SasFileParser {
     private interface ProcessingDataSubheader extends ProcessingSubheader {
         /**
          * Method which should be overwritten in implementing this interface classes.
+         *
          * @param subheaderOffset offset in bytes from the beginning of subheader.
          * @param subheaderLength length of subheader in bytes.
-         * @param columnNames list of column names which should be processed.
+         * @param columnNames     list of column names which should be processed.
          * @throws IOException if reading from the {@link SasFileParser#sasFileStream} stream is impossible.
          */
         void processSubheader(long subheaderOffset, long subheaderLength, List<String> columnNames) throws IOException;
@@ -1043,16 +1285,29 @@ public final class SasFileParser {
     /**
      * SasFileParser builder class made using builder pattern.
      */
-    static class Builder {
+    public static class Builder {
+
+        /**
+         * Empty private constructor to prevent instantiation without the {@link SasFileParser#sasFileStream} variable.
+         */
+        private Builder() {
+
+        }
+
         /**
          * Builder variable for {@link SasFileParser#sasFileStream} variable.
          */
         private InputStream sasFileStream;
 
         /**
-         * Default value for {@link SasFileProperties#encoding} variable.
+         * Builder variable for {@link SasFileParser#encoding} variable.
          */
-        private String encoding = "US-ASCII";
+        private String encoding;
+
+        /**
+         * Default value for {@link SasFileParser#outputDateType} variable.
+         */
+        private OutputDateType outputDateType = OutputDateType.JAVA_DATE_LEGACY;
 
         /**
          * Default value for {@link SasFileParser#byteOutput} variable.
@@ -1060,14 +1315,12 @@ public final class SasFileParser {
         private Boolean byteOutput = false;
 
         /**
-         * The function to specify builders sasFileStream variable.
+         * The constructor that specifies builders sasFileStream variable.
          *
-         * @param val value to be set.
-         * @return result builder.
+         * @param sasFileStream value for {@link SasFileParser#sasFileStream} variable.
          */
-        Builder sasFileStream(InputStream val) {
-            sasFileStream = val;
-            return this;
+        public Builder(InputStream sasFileStream) {
+            this.sasFileStream = sasFileStream;
         }
 
         /**
@@ -1076,8 +1329,21 @@ public final class SasFileParser {
          * @param val value to be set.
          * @return result builder.
          */
-        Builder encoding(String val) {
+        public Builder encoding(String val) {
             encoding = val;
+            return this;
+        }
+
+        /**
+         * Sets the specified type of the output date format.
+         *
+         * @param val value to be set.
+         * @return result builder.
+         */
+        public Builder outputDateType(OutputDateType val) {
+            if (val != null) {
+                outputDateType = val;
+            }
             return this;
         }
 
@@ -1087,7 +1353,7 @@ public final class SasFileParser {
          * @param val value to be set.
          * @return result builder.
          */
-        Builder byteOutput(Boolean val) {
+        public Builder byteOutput(Boolean val) {
             byteOutput = val;
             return this;
         }
@@ -1097,7 +1363,7 @@ public final class SasFileParser {
          *
          * @return newly built SasFileParser
          */
-        SasFileParser build() {
+        public SasFileParser build() {
             return new SasFileParser(this);
         }
     }
@@ -1108,7 +1374,7 @@ public final class SasFileParser {
      * {@link SasFileConstants#COMPRESSED_SUBHEADER_ID}, {@link SasFileConstants#COMPRESSED_SUBHEADER_TYPE}
      * for details).
      */
-    class SubheaderPointer {
+    static class SubheaderPointer {
         /**
          * The offset from the beginning of a page at which a subheader is stored.
          */
@@ -1156,7 +1422,7 @@ public final class SasFileParser {
     /**
      * The class to process subheaders of the RowSizeSubheader type that store information about the table rows length
      * (in bytes), the number of rows in the table and the number of rows on the last page of the
-     * {@link SasFileConstants#PAGE_MIX_TYPE} type. The results are stored in {@link SasFileProperties#rowLength},
+     * {@link PageType#PAGE_TYPE_MIX} type. The results are stored in {@link SasFileProperties#rowLength},
      * {@link SasFileProperties#rowCount}, and {@link SasFileProperties#mixPageRowCount}, respectively.
      */
     class RowSizeSubheader implements ProcessingSubheader {
@@ -1174,8 +1440,17 @@ public final class SasFileParser {
             int intOrLongLength = sasFileProperties.isU64() ? BYTES_IN_LONG : BYTES_IN_INT;
             Long[] offset = {subheaderOffset + ROW_LENGTH_OFFSET_MULTIPLIER * intOrLongLength,
                     subheaderOffset + ROW_COUNT_OFFSET_MULTIPLIER * intOrLongLength,
-                    subheaderOffset + ROW_COUNT_ON_MIX_PAGE_OFFSET_MULTIPLIER * intOrLongLength};
-            Integer[] length = {intOrLongLength, intOrLongLength, intOrLongLength};
+                    subheaderOffset + ROW_COUNT_ON_MIX_PAGE_OFFSET_MULTIPLIER * intOrLongLength,
+                    subheaderOffset + FILE_FORMAT_OFFSET_OFFSET + 82 * intOrLongLength,
+                    subheaderOffset + FILE_FORMAT_LENGTH_OFFSET + 82 * intOrLongLength,
+                    subheaderOffset + DELETED_ROW_COUNT_OFFSET_MULTIPLIER * intOrLongLength,
+                    subheaderOffset + COMPRESSION_METHOD_OFFSET + 82 * intOrLongLength,
+                    subheaderOffset + COMPRESSION_METHOD_LENGTH_OFFSET + 82 * intOrLongLength,
+            };
+            Integer[] length = {intOrLongLength, intOrLongLength, intOrLongLength,
+                    FILE_FORMAT_OFFSET_LENGTH, FILE_FORMAT_LENGTH_LENGTH,
+                    intOrLongLength,
+                    COMPRESSION_METHOD_OFFSET_LENGTH, COMPRESSION_METHOD_LENGTH_LENGTH};
             List<byte[]> vars = getBytesFromFile(offset, length);
 
             if (sasFileProperties.getRowLength() == 0) {
@@ -1187,6 +1462,16 @@ public final class SasFileParser {
             if (sasFileProperties.getMixPageRowCount() == 0) {
                 sasFileProperties.setMixPageRowCount(bytesToLong(vars.get(2)));
             }
+
+            fileLabelOffset = bytesToShort(vars.get(3));
+            fileLabelLength = bytesToShort(vars.get(4));
+
+            if (sasFileProperties.getDeletedRowCount() == 0) {
+                sasFileProperties.setDeletedRowCount(bytesToLong(vars.get(5)));
+            }
+
+            compressionMethodOffset = bytesToShort(vars.get(6));
+            compressionMethodLength = bytesToShort(vars.get(7));
         }
     }
 
@@ -1218,7 +1503,7 @@ public final class SasFileParser {
      * The class to process subheaders of the SubheaderCountsSubheader type that does not contain
      * any information relevant to the current issues.
      */
-    class SubheaderCountsSubheader implements ProcessingSubheader {
+    static class SubheaderCountsSubheader implements ProcessingSubheader {
         /**
          * The function to read metadata. At the moment the function is empty as the information in
          * SubheaderCountsSubheader is not needed for the current issues.
@@ -1264,8 +1549,11 @@ public final class SasFileParser {
             columnsNamesBytes.add(vars.get(0));
             if (columnsNamesBytes.size() == 1) {
                 byte[] columnName = columnsNamesBytes.get(0);
-                String compessionLiteral = findCompressionLiteral(bytesToString(columnName));
-                sasFileProperties.setCompressionMethod(compessionLiteral); //might be null
+                String compressionMethod = bytesToString(columnName, compressionMethodOffset, compressionMethodLength);
+                if (matchCompressionMethod(compressionMethod)) {
+                    sasFileProperties.setCompressionMethod(compressionMethod);
+                }
+                sasFileProperties.setFileLabel(bytesToString(columnName, fileLabelOffset, fileLabelLength));
             }
         }
     }
@@ -1378,8 +1666,8 @@ public final class SasFileParser {
         @Override
         public void processSubheader(long subheaderOffset, long subheaderLength) throws IOException {
             int intOrLongLength = sasFileProperties.isU64() ? BYTES_IN_LONG : BYTES_IN_INT;
-            Long[] offset = {subheaderOffset + COLUMN_FORMAT_WIDTH_OFFSET + intOrLongLength,
-                    subheaderOffset + COLUMN_FORMAT_PRECISION_OFFSET + intOrLongLength,
+            Long[] offset = {subheaderOffset + COLUMN_FORMAT_WIDTH_OFFSET + 3 * intOrLongLength,
+                    subheaderOffset + COLUMN_FORMAT_PRECISION_OFFSET + 3 * intOrLongLength,
                     subheaderOffset + COLUMN_FORMAT_TEXT_SUBHEADER_INDEX_OFFSET + 3 * intOrLongLength,
                     subheaderOffset + COLUMN_FORMAT_OFFSET_OFFSET + 3 * intOrLongLength,
                     subheaderOffset + COLUMN_FORMAT_LENGTH_OFFSET + 3 * intOrLongLength,
@@ -1427,7 +1715,7 @@ public final class SasFileParser {
      * The class to process subheaders of the ColumnListSubheader type that do not store any information relevant
      * to the current tasks.
      */
-    class ColumnListSubheader implements ProcessingSubheader {
+    static class ColumnListSubheader implements ProcessingSubheader {
         /**
          * The method to read metadata. It is empty at the moment because the data stored in ColumnListSubheader
          * are not used.

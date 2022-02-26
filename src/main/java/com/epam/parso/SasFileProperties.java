@@ -1,19 +1,19 @@
 /**
  * *************************************************************************
  * Copyright (C) 2015 EPAM
-
+ * <p>
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- *
+ * <p>
  * http://www.apache.org/licenses/LICENSE-2.0
- *
+ * <p>
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
+ * <p>
  * *************************************************************************
  */
 
@@ -60,6 +60,11 @@ public class SasFileProperties {
      * The type of the sas7bdat file.
      */
     private String fileType;
+
+    /**
+     * The label of the sas7bdat file.
+     */
+    private String fileLabel;
 
     /**
      * The date of the sas7bdat file creation.
@@ -117,6 +122,11 @@ public class SasFileProperties {
     private long rowCount;
 
     /**
+     * The number of rows in the table.
+     */
+    private long deletedRowCount;
+
+    /**
      * The number of rows on the page containing both data and metadata.
      */
     private long mixPageRowCount;
@@ -167,6 +177,24 @@ public class SasFileProperties {
      */
     public void setFileType(String fileType) {
         this.fileType = fileType;
+    }
+
+    /**
+     * The function to get fileLabel.
+     *
+     * @return the label of the sas7bdat file.
+     */
+    public String getFileLabel() {
+        return fileLabel;
+    }
+
+    /**
+     * The method to specify fileLabel.
+     *
+     * @param fileLabel the label of the sas7bdat file.
+     */
+    public void setFileLabel(String fileLabel) {
+        this.fileLabel = fileLabel;
     }
 
     /**
@@ -465,6 +493,24 @@ public class SasFileProperties {
      */
     public void setRowCount(long rowCount) {
         this.rowCount = rowCount;
+    }
+
+    /**
+     * The function to get deletedRowCount.
+     *
+     * @return the number of deleted rows in the table.
+     */
+    public long getDeletedRowCount() {
+        return deletedRowCount;
+    }
+
+    /**
+     * The method to specify deletedRowCount.
+     *
+     * @param deletedRowCount the number of deleted rows in the table.
+     */
+    public void setDeletedRowCount(long deletedRowCount) {
+        this.deletedRowCount = deletedRowCount;
     }
 
     /**
